@@ -4,9 +4,9 @@ Radiotherm ct50 thermostat to MQTT
 I moved to this from the Home assistant integration because HA didn't retry and would go unavailable constantly.
 
 
-##HA Thermostat configs
+## HA Thermostat configs
 
-###Hold switch
+### Hold switch
 ```
 mqtt:
   switch:
@@ -44,7 +44,7 @@ mqtt:
       fan_mode_state_topic: "climate/stat/kitchen_tstat/fan_mode"
       precision: 0.5
 ```
-###systemd
+### systemd
 ~~~
 [Unit]
 Description=Python script to recieve data from Radiotherm thermostate and publish to mqtt
