@@ -1,6 +1,74 @@
 import requests
 from time import sleep
 from datetime import datetime
+import paho.mqtt.client as mqtt
+import signal
+import sys
+from time import sleep
+import json
+from configparser import ConfigParser
+import argparse
+
+DEVICE_NAME="familyroom_tstat"
+TSTAT_IP = "fr-tstat.lan"
+ID="familyroom_tstat"
+
+MQTT_ID = "familyroom_tstat"
+BROKER = "192.168.5.200"
+PORT = 1883
+USERNAME = "<<mqtt_username>>"
+PASSWORD = "<<mqtt_password>>"
+
+DEVICE_NAME = ""
+TSTAT_IP = ""
+ID = ""
+MQTT_ID = ""
+BROKER = ""
+PORT = ""
+USERNAME = ""
+PASSWORD = ""
+
+parser = argparse.ArgumentParser(description='Example script using configparser')
+parser.add_argument('-c', '--config', required=True, type=str, help='Path to configuration file')
+parser.add_argument('-d', '--device', required=True, type=str, help='Device section in configuration file')
+args = parser.parse_args()
+print("Loading configuration file: " + args.config, flush=True)
+print("Device: " + args.device, flush=True)
+
+config = ConfigParser()
+config.read(args.config)
+
+DEVICE_NAME = config.get(args.device, 'DEVICE_NAME')
+TSTAT_IP = config.get(args.device, 'TSTAT_IP')
+ID = config.get(args.device, 'ID')
+MQTT_ID = config.get(args.device, 'MQTT_ID')
+BROKER = config.get(args.device, 'BROKER')
+PORT = config.get(args.device, 'PORT')
+USERNAME = config.get(args.device, 'USERNAME')
+PASSWORD = config.get(args.device, 'PASSWORD')
+
+print("DEVICE_NAME: " + DEVICE_NAME, flush=True)
+print("TSTAT_IP:    " + TSTAT_IP, flush=True)
+print("ID:          " + ID, flush=True)
+print("MQTT_ID:     " + MQTT_ID, flush=True)
+print("BROKER:      " + BROKER, flush=True)
+print("PORT:        " + PORT, flush=True)
+print("USERNAME:    " + USERNAME, flush=True)
+print("PASSWORD:    " + PASSWORD, flush=True)
+
+STATUS_TOPIC = "climate/stat/{0}/status".format(DEVICE_NAME)
+HVAC_ACTION_TOPIC = "climate/stat/{0}/hvac_action".format(DEVICE_NAME)
+CURRENT_TEMP_TOPIC = "climate/stat/{0}/current_temperature".format(DEVICE_NAME)
+TARGET_TEMP_TOPIC = "climate/stat/{0}/target_temperature".format(DEVICE_NAME)
+FAN_TOPIC = "climate/stat/{0}/fan".format(DEVICE_NAME)
+FAN_MODE_TOPIC = "climate/stat/{0}/fan_mode".format(DEVICE_NAME)
+MODE_TOPIC = "climate/stat/{0}/mode".format(DEVICE_NAME)
+HOLD_TOPIC = "climate/stat/{0}/hold".format(DEVICE_NAME)
+SET_TEMP = "climate/cmnd/{0}/settemp".format(DEVICE_NAME)
+SET_MODE = "climate/cmnd/{0}/setmode".format(DEVICE_NAME)
+SET_FAN = "climate/cmnd/{0}/setfan".format(DEVICE_NAME)
+SET_HOLD = "climate/cmnd/{0}/sethold".format(DEVICE_NAME)
+AVAILABLE_TOPIC = "climate/tele/{0}/available".format(DEVICE_NAME)
 
 
 class CT50:
@@ -27,7 +95,7 @@ class CT50:
     CODE_TO_HOLD_MODE = {0: "program", 1: "hold"}
     HOLD_MODE_TO_CODE = {v: k for k, v in CODE_TO_HOLD_MODE.items()}
 
-    def __init__(self, therm_address, error_delay=5, timeout=10):
+    def __init__(self, therm_address, error_delay=5, timeout=5):
         self.address = therm_address
         self.base_url = f"http://{therm_address}/"
         self.error_delay = error_delay
@@ -38,6 +106,9 @@ class CT50:
     def api_get(self, cmd):
         try:
             r = requests.get(self.base_url + cmd, timeout=self.timeout)
+            if r.status_code != 200:
+                print(f"Thermostat responed with error {r.text}", flush=True)
+                raise
             return r
         except Exception as ex:
             print("Exception with api call: " + cmd, flush=True)
@@ -48,6 +119,9 @@ class CT50:
         try:
             r = requests.post(self.base_url + cmd, json=json,
                               timeout=self.timeout)
+            if r.status_code != 200:
+                print(f"Thermostat responed with error {r.text}", flush=True)
+                raise
             return r
         except Exception as ex:
             print("Exception with api call: " + cmd, flush=True)
@@ -120,14 +194,13 @@ class CT50:
                     r = self.api_post("tstat", json={"t_heat": temp})
                 elif self.current_stat["mode"] == "cool":
                     r = self.api_post("tstat", json={"t_cool": temp})
+                if r.status_code != 200:
+                  print(f"Thermostat set temp responed with error {r.text}", flush=True)
                 break
             except Exception as e:
                 print("Error setting temp, trying again...", flush=True)
                 print(repr(e), flush=True)
                 sleep(self.error_delay)
-        if r.status_code != 200:
-            print(f"Thermostat set temp responed with error {r.text}", flush=True)
-
         return self.update_status()
 
     def set_mode(self, new_mode):
@@ -199,3 +272,80 @@ class CT50:
 
         if r.status_code != 200:
             print(f"Thermostat set time responed with error {r.text}", flush=True)
+
+def end_well(signum, stackframe):
+    global run
+    print("Stopping MQTT loop...", flush=True)
+    client.publish(AVAILABLE_TOPIC, "offline", retain=False)
+    client.disconnect()
+    client.loop_stop()
+    quit()
+
+def on_log(client, userdata, level, buf):
+    print("mqtt: ", buf, level, flush=True)
+
+def on_connect(client, userdata, flags, rc):
+    client.subscribe(SET_TEMP)
+    client.subscribe(SET_MODE)
+    client.subscribe(SET_FAN)
+    client.subscribe(SET_HOLD)
+    client.message_callback_add(SET_TEMP, on_set_temp)
+    client.message_callback_add(SET_MODE, on_set_mode)
+    client.message_callback_add(SET_FAN, on_set_fan)
+    client.message_callback_add(SET_HOLD, on_set_hold)
+
+def on_set_temp(client, userdata, msg):
+    client.publish(TARGET_TEMP_TOPIC, msg.payload.decode(), retain=False)
+    tstat.set_temp(msg.payload.decode())
+    print(repr(tstat.current_stat), flush=True)
+
+def on_set_mode(client, userdata, msg):
+    client.publish(MODE_TOPIC, msg.payload.decode(), retain=False)
+    tstat.set_mode(msg.payload.decode())
+    print(repr(tstat.current_stat), flush=True)
+
+def on_set_fan(client, userdata, msg):
+    client.publish(FAN_MODE_TOPIC, msg.payload.decode(), retain=False)
+    tstat.set_fan(msg.payload.decode())
+    print(repr(tstat.current_stat), flush=True)
+
+def on_set_hold(client, userdata, msg):
+    client.publish(HOLD_TOPIC, msg.payload.decode(), retain=False)
+    tstat.set_hold(msg.payload.decode())
+    print(repr(tstat.current_stat), flush=True)
+
+#############################################
+###### MAIN ######
+#############################################
+
+signal.signal(signal.SIGINT, end_well)
+signal.signal(signal.SIGTERM, end_well)
+
+
+client = mqtt.Client(client_id=MQTT_ID)
+#client.on_log = on_log
+client.username_pw_set(USERNAME, PASSWORD)
+client.will_set(AVAILABLE_TOPIC, "offline")
+client.on_connect = on_connect
+client.connect(BROKER, port=int(PORT))
+client.loop_start()
+
+tstat = CT50(therm_address = TSTAT_IP)
+
+while True:
+
+    tstat.update_status()
+    print(repr(tstat.current_stat), flush=True)
+
+    client.publish(AVAILABLE_TOPIC, "online", retain=False)
+
+    client.publish(STATUS_TOPIC, json.dumps(tstat.current_stat), retain=False)
+    client.publish(HVAC_ACTION_TOPIC, tstat.current_stat['hvac_action'], retain=False)
+    client.publish(CURRENT_TEMP_TOPIC, tstat.current_stat['temp'], retain=False)
+    client.publish(TARGET_TEMP_TOPIC, tstat.current_stat['target_temp'], retain=False)
+    client.publish(FAN_TOPIC, tstat.current_stat['fan_state'], retain=False)
+    client.publish(FAN_MODE_TOPIC, tstat.current_stat['fan_mode'], retain=False)
+    client.publish(MODE_TOPIC, tstat.current_stat['mode'], retain=False)
+    client.publish(HOLD_TOPIC, tstat.current_stat['hold_mode'], retain=False)
+    sleep(10)
+
