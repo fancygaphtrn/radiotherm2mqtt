@@ -3,6 +3,16 @@ Radiotherm ct50 thermostat to MQTT
 
 I moved to this from the Home assistant integration because HA didn't retry and would go unavailable constantly.
 
+## Installation
+Can be any directory but I use the following.  Systemd file will need to match.
+
+Create /usr/src/radiotherm2mqtt
+Download myradiotherm.py and config.ini to above directory.
+Update config.ini for you thermostat.
+Test by running python3 myradiotherm.py -c config.ini -d Kitchen
+Once working install systemd file so it starts on boot.
+
+Note: it can be run multiple times for multiple thermostats.
 
 ## HA Thermostat configs
 
@@ -47,13 +57,13 @@ mqtt:
 ### systemd
 ~~~
 [Unit]
-Description=Python script to recieve data from Radiotherm thermostate and publish to mqtt
+Description=Python script to receive data from Radiotherm thermostate and publish to mqtt
 After=syslog.target network.target
 
 [Service]
 User=htrn
 WorkingDirectory=/usr/src/radiotherm2mqtt
-ExecStart=/usr/bin/python3 /usr/src/radiotherm2mqtt/radiotherm2mqtt_kitchen.py
+ExecStart=/usr/bin/python3 /usr/src/radiotherm2mqtt/myradiotherm.py -c config.ini -d Kitchen
 
 Restart=always
 RestartSec=30
@@ -61,3 +71,4 @@ RestartSec=30
 [Install]
 WantedBy=multi-user.target
 ```
+
