@@ -54,7 +54,7 @@ mqtt:
       fan_mode_state_topic: "climate/stat/kitchen_tstat/fan_mode"
       precision: 0.5
 ```
-### systemd
+## systemd
 ~~~
 [Unit]
 Description=Python script to receive data from Radiotherm thermostate and publish to mqtt
