@@ -1,23 +1,21 @@
 import requests
-from time import sleep
 from datetime import datetime
+from time import sleep
 import paho.mqtt.client as mqtt
+import logging
 import signal
 import sys
-from time import sleep
 import json
 from configparser import ConfigParser
 import argparse
 
-DEVICE_NAME="familyroom_tstat"
-TSTAT_IP = "fr-tstat.lan"
-ID="familyroom_tstat"
+logging.basicConfig(stream=sys.stdout, level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-MQTT_ID = "familyroom_tstat"
-BROKER = "192.168.5.200"
-PORT = 1883
-USERNAME = "<<mqtt_username>>"
-PASSWORD = "<<mqtt_password>>"
+logging.info("Starting ...")
+
+ERROR_DELAY=5
+TIMEOUT=3
+MAX_RETRIES=5
 
 DEVICE_NAME = ""
 TSTAT_IP = ""
@@ -32,8 +30,9 @@ parser = argparse.ArgumentParser(description='Example script using configparser'
 parser.add_argument('-c', '--config', required=True, type=str, help='Path to configuration file')
 parser.add_argument('-d', '--device', required=True, type=str, help='Device section in configuration file')
 args = parser.parse_args()
-print("Loading configuration file: " + args.config, flush=True)
-print("Device: " + args.device, flush=True)
+
+logging.info(f"Loading configuration file: {args.config}")
+logging.info(f"Device: {args.device}")
 
 config = ConfigParser()
 config.read(args.config)
@@ -47,28 +46,28 @@ PORT = config.get(args.device, 'PORT')
 USERNAME = config.get(args.device, 'USERNAME')
 PASSWORD = config.get(args.device, 'PASSWORD')
 
-print("DEVICE_NAME: " + DEVICE_NAME, flush=True)
-print("TSTAT_IP:    " + TSTAT_IP, flush=True)
-print("ID:          " + ID, flush=True)
-print("MQTT_ID:     " + MQTT_ID, flush=True)
-print("BROKER:      " + BROKER, flush=True)
-print("PORT:        " + PORT, flush=True)
-print("USERNAME:    " + USERNAME, flush=True)
-print("PASSWORD:    " + PASSWORD, flush=True)
+logging.info(f"DEVICE_NAME: {DEVICE_NAME}")
+logging.info(f"TSTAT_IP:    {TSTAT_IP}")
+logging.info(f"ID:          {ID}")
+logging.info(f"MQTT_ID:     {MQTT_ID}")
+logging.info(f"BROKER:      {BROKER}")
+logging.info(f"PORT:        {PORT}")
+logging.info(f"USERNAME:    {USERNAME}")
+logging.info(f"PASSWORD:    {PASSWORD}")
 
-STATUS_TOPIC = "climate/stat/{0}/status".format(DEVICE_NAME)
-HVAC_ACTION_TOPIC = "climate/stat/{0}/hvac_action".format(DEVICE_NAME)
-CURRENT_TEMP_TOPIC = "climate/stat/{0}/current_temperature".format(DEVICE_NAME)
-TARGET_TEMP_TOPIC = "climate/stat/{0}/target_temperature".format(DEVICE_NAME)
-FAN_TOPIC = "climate/stat/{0}/fan".format(DEVICE_NAME)
-FAN_MODE_TOPIC = "climate/stat/{0}/fan_mode".format(DEVICE_NAME)
-MODE_TOPIC = "climate/stat/{0}/mode".format(DEVICE_NAME)
-HOLD_TOPIC = "climate/stat/{0}/hold".format(DEVICE_NAME)
-SET_TEMP = "climate/cmnd/{0}/settemp".format(DEVICE_NAME)
-SET_MODE = "climate/cmnd/{0}/setmode".format(DEVICE_NAME)
-SET_FAN = "climate/cmnd/{0}/setfan".format(DEVICE_NAME)
-SET_HOLD = "climate/cmnd/{0}/sethold".format(DEVICE_NAME)
-AVAILABLE_TOPIC = "climate/tele/{0}/available".format(DEVICE_NAME)
+STATUS_TOPIC       = f"climate/stat/{DEVICE_NAME}/status"
+HVAC_ACTION_TOPIC  = f"climate/stat/{DEVICE_NAME}/hvac_action"
+CURRENT_TEMP_TOPIC = f"climate/stat/{DEVICE_NAME}/current_temperature"
+TARGET_TEMP_TOPIC  = f"climate/stat/{DEVICE_NAME}/target_temperature"
+FAN_TOPIC          = f"climate/stat/{DEVICE_NAME}/fan"
+FAN_MODE_TOPIC     = f"climate/stat/{DEVICE_NAME}/fan_mode"
+MODE_TOPIC         = f"climate/stat/{DEVICE_NAME}/mode"
+HOLD_TOPIC         = f"climate/stat/{DEVICE_NAME}/hold"
+SET_TEMP           = f"climate/cmnd/{DEVICE_NAME}/settemp"
+SET_MODE           = f"climate/cmnd/{DEVICE_NAME}/setmode"
+SET_FAN            = f"climate/cmnd/{DEVICE_NAME}/setfan"
+SET_HOLD           = f"climate/cmnd/{DEVICE_NAME}/sethold"
+AVAILABLE_TOPIC    = f"climate/tele/{DEVICE_NAME}/available"
 
 
 class CT50:
@@ -95,51 +94,54 @@ class CT50:
     CODE_TO_HOLD_MODE = {0: "program", 1: "hold"}
     HOLD_MODE_TO_CODE = {v: k for k, v in CODE_TO_HOLD_MODE.items()}
 
-    def __init__(self, therm_address, error_delay=5, timeout=5):
+    def __init__(self, therm_address, error_delay=ERROR_DELAY, max_retries=MAX_RETRIES, timeout=TIMEOUT):
         self.address = therm_address
         self.base_url = f"http://{therm_address}/"
         self.error_delay = error_delay
+        self.max_retries = max_retries
         self.timeout = timeout
         self.set_clock()
         self.update_status()
 
     def api_get(self, cmd):
-        try:
-            r = requests.get(self.base_url + cmd, timeout=self.timeout)
-            if r.status_code != 200:
-                print(f"Thermostat responed with error {r.text}", flush=True)
-                raise
-            return r
-        except Exception as ex:
-            print("Exception with api call: " + cmd, flush=True)
-            print(repr(ex), flush=True)
-            raise
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                r = requests.get(self.base_url + cmd, timeout=self.timeout)
+                if r.status_code == 200:
+                    return r
+                else:
+                    logging.info(f"Thermostat get {cmd} responded with error {r.status_code} {r.text} Retrying...")
+            except Exception as ex:
+                logging.info(f"Exception with API get call: {cmd} {retries}")
+                logging.info(f"{repr(ex)}")
+                retries += 1
+                sleep(self.error_delay)
+        
+        logging.info(F"API get call {cmd} max retries exceeded. Failed to make the request.")
+        return None
 
     def api_post(self, cmd, json):
-        try:
-            r = requests.post(self.base_url + cmd, json=json,
-                              timeout=self.timeout)
-            if r.status_code != 200:
-                print(f"Thermostat responed with error {r.text}", flush=True)
-                raise
-            return r
-        except Exception as ex:
-            print("Exception with api call: " + cmd, flush=True)
-            print(repr(ex), flush=True)
-            raise
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                r = requests.post(self.base_url + cmd, json=json, timeout=self.timeout)
+                if r.status_code == 200:
+                    return r
+                else:
+                    logging.info(f"Thermostat post {cmd} responded with error {r.status_code} {r.text} Retrying...")
+            except Exception as ex:
+                logging.info(f"Exception with API post call: {cmd} {retries}")
+                logging.info(f"{repr(ex)}")
+                retries += 1
+                sleep(self.error_delay)
+        
+        logging.info(F"API post call {cmd} max retries exceeded. Failed to make the request.")
+        return None
 
     def update_status(self):
-        while True:
-            while True:
-                try:
-                    r = self.api_get("tstat")
-                    break
-                except:
-                    sleep(self.error_delay)
-            if r.status_code != 200:
-                print(f"Thermostat responed with error {r.text}", flush=True)
-                return r.json
-
+        r = self.api_get("tstat")
+        if r: 
             stat = r.json()
 
             try:
@@ -148,7 +150,7 @@ class CT50:
                 stat["fan_mode"] = self.CODE_TO_FAN_MODE[stat["fmode"]]
                 stat["fan_state"] = self.CODE_TO_FAN_STATE[stat["fstate"]]
                 stat["hold_mode"] = self.CODE_TO_HOLD_MODE[stat["hold"]]
-
+    
                 if stat["mode"] == "off":
                     stat["target_temp"] = ''
                 elif stat["mode"] == "heat":
@@ -166,123 +168,81 @@ class CT50:
                     stat["hvac_action"] = "idle"
                 elif stat["hvac_status"] == "off" and stat["fan_state"] == "on":
                     stat["hvac_action"] = "idle"
-
+    
                 del stat["tmode"]
                 del stat["tstate"]
                 del stat["fmode"]
                 del stat["fstate"]
                 del stat["hold"]
                 del stat["t_type_post"]
-                # print(repr(stat), flush=True)
-                break
+    
+                self.current_stat = stat
+                return stat
             except Exception as ex:
-                print("Error updating status, retry...", flush=True)
-                print(repr(ex), flush=True)
-                sleep(self.error_delay)
-
-        self.current_stat = stat
-        print(repr(self.current_stat), flush=True)
-        return stat
+                logging.info("Error updating status, retry...",)
+                logging.info(f"{repr(ex)}")
+                return None
+        else:
+            return None
 
     def set_temp(self, new_temp):
         temp = float(new_temp)
-        print(f"Setting target temp to {temp}", flush=True)
-
-        while True:
-            try:
-                if self.current_stat["mode"] == "heat":
-                    r = self.api_post("tstat", json={"t_heat": temp})
-                elif self.current_stat["mode"] == "cool":
-                    r = self.api_post("tstat", json={"t_cool": temp})
-                if r.status_code != 200:
-                  print(f"Thermostat set temp responed with error {r.text}", flush=True)
-                break
-            except Exception as e:
-                print("Error setting temp, trying again...", flush=True)
-                print(repr(e), flush=True)
-                sleep(self.error_delay)
-        return self.update_status()
+        logging.info(f"Setting target temp to {temp}")
+        if self.current_stat["mode"] == "heat":
+            r = self.api_post("tstat", json={"t_heat": temp})
+        elif self.current_stat["mode"] == "cool":
+            r = self.api_post("tstat", json={"t_cool": temp})
+        else:
+            r == None
+        if r == None:
+           logging.info(f"Thermostat set temp failed")
 
     def set_mode(self, new_mode):
-        print(f"Setting HVAC mode to {new_mode}", flush=True)
+        logging.info(f"Setting HVAC mode to {new_mode}")
         new_code = self.TEMP_MODE_TO_CODE[new_mode]
-        while True:
-            try:
-                r = self.api_post("tstat", json={"tmode": new_code})
-                break
-            except Exception as e:
-                print("Error setting HVAC mode, trying again...", flush=True)
-                print(repr(e), flush=True)
-                sleep(self.error_delay)
-
-        if r.status_code != 200:
-            print(f"Thermostat set mode responed with error {r.text}", flush=True)
-
-        return self.update_status()
+        r = self.api_post("tstat", json={"tmode": new_code})
+        if r == None:
+           logging.info(f"Thermostat set mode failed")
 
     def set_fan(self, new_fan_mode):
-        print(f"Setting fan to {new_fan_mode}", flush=True)
+        logging.info(f"Setting fan to {new_fan_mode}")
         new_code = self.FAN_MODE_TO_CODE[new_fan_mode]
-        while True:
-            try:
-                r = self.api_post("tstat", json={"fmode": new_code})
-                break
-            except Exception as e:
-                print("Error setting fan mode, trying again...", flush=True)
-                print(repr(e), flush=True)
-                sleep(self.error_delay)
-
-        if r.status_code != 200:
-            print(f"Thermostat set fan responed with error {r.text}", flush=True)
-
-        return self.update_status()
+        r = self.api_post("tstat", json={"fmode": new_code})
+        if r == None:
+           logging.info(f"Thermostat set fan failed")
 
     def set_hold(self, new_hold_mode):
-        print(f"Setting hold mode to {new_hold_mode}", flush=True)
+        logging.info(f"Setting hold mode to {new_hold_mode}")
         new_code = self.HOLD_MODE_TO_CODE[new_hold_mode]
-        while True:
-            try:
-                r = self.api_post("tstat", json={"hold": new_code})
-                break
-            except Exception as e:
-                print("Error setting hold mode, trying again...", flush=True)
-                print(repr(e), flush=True)
-                sleep(self.error_delay)
-
-        if r.status_code != 200:
-            print(f"Thermostat set hold responed with error {r.text}", flush=True)
-
-        return self.update_status()
-
+        r = self.api_post("tstat", json={"hold": new_code})
+        if r == None:
+           logging.info(f"Thermostat set hold failed")
+ 
     def set_clock(self):
+        logging.info(f"Setting clock")
         n = datetime.now()
         d = {
             "day": n.weekday(),
             "hour": n.hour,
             "minute": n.minute
         }
-        while True:
-            try:
-                r = self.api_post("tstat", json={"time": d})
-                break
-            except Exception as e:
-                print("Error setting time, trying again...", flush=True)
-                print(repr(e), flush=True)
-                sleep(self.error_delay)
-
-        if r.status_code != 200:
-            print(f"Thermostat set time responed with error {r.text}", flush=True)
+        r = self.api_post("tstat", json={"time": d})
+        if r == None:
+           logging.info(f"Thermostat set clock failed")
 
 def end_well(signum, stackframe):
-    global run
-    print("Stopping MQTT loop...", flush=True)
+    logging.info("Stopping MQTT loop...")
     client.publish(AVAILABLE_TOPIC, "offline", retain=False)
     client.disconnect()
     client.loop_stop()
-    quit()
+    logging.info("Stopped MQTT loop...")
+
+    global run
+    logging.info("Stopping Main loop...")
+    run = False
 
 def on_log(client, userdata, level, buf):
-    print("mqtt: ", buf, level, flush=True)
+    logging.info("mqtt: ", buf, level)
 
 def on_connect(client, userdata, flags, rc):
     client.subscribe(SET_TEMP)
@@ -297,22 +257,18 @@ def on_connect(client, userdata, flags, rc):
 def on_set_temp(client, userdata, msg):
     client.publish(TARGET_TEMP_TOPIC, msg.payload.decode(), retain=False)
     tstat.set_temp(msg.payload.decode())
-    print(repr(tstat.current_stat), flush=True)
 
 def on_set_mode(client, userdata, msg):
     client.publish(MODE_TOPIC, msg.payload.decode(), retain=False)
     tstat.set_mode(msg.payload.decode())
-    print(repr(tstat.current_stat), flush=True)
 
 def on_set_fan(client, userdata, msg):
     client.publish(FAN_MODE_TOPIC, msg.payload.decode(), retain=False)
     tstat.set_fan(msg.payload.decode())
-    print(repr(tstat.current_stat), flush=True)
 
 def on_set_hold(client, userdata, msg):
     client.publish(HOLD_TOPIC, msg.payload.decode(), retain=False)
     tstat.set_hold(msg.payload.decode())
-    print(repr(tstat.current_stat), flush=True)
 
 #############################################
 ###### MAIN ######
@@ -331,21 +287,34 @@ client.connect(BROKER, port=int(PORT))
 client.loop_start()
 
 tstat = CT50(therm_address = TSTAT_IP)
+run = True
+previous_status = ""
 
-while True:
-
-    tstat.update_status()
-    print(repr(tstat.current_stat), flush=True)
+while run:
 
     client.publish(AVAILABLE_TOPIC, "online", retain=False)
 
-    client.publish(STATUS_TOPIC, json.dumps(tstat.current_stat), retain=False)
-    client.publish(HVAC_ACTION_TOPIC, tstat.current_stat['hvac_action'], retain=False)
-    client.publish(CURRENT_TEMP_TOPIC, tstat.current_stat['temp'], retain=False)
-    client.publish(TARGET_TEMP_TOPIC, tstat.current_stat['target_temp'], retain=False)
-    client.publish(FAN_TOPIC, tstat.current_stat['fan_state'], retain=False)
-    client.publish(FAN_MODE_TOPIC, tstat.current_stat['fan_mode'], retain=False)
-    client.publish(MODE_TOPIC, tstat.current_stat['mode'], retain=False)
-    client.publish(HOLD_TOPIC, tstat.current_stat['hold_mode'], retain=False)
+    if tstat.update_status():
+        # will send updates every minute because of the time changing minimum.
+        # Otherwise will update every time relevent tstat data changes.
+        if json.dumps(tstat.current_stat) != previous_status:
+            client.publish(STATUS_TOPIC, json.dumps(tstat.current_stat), retain=False)
+            previous_status = json.dumps(tstat.current_stat)
+    
+            logging.info(f"Status: {repr(tstat.current_stat)}")
+    
+            client.publish(HVAC_ACTION_TOPIC, tstat.current_stat['hvac_action'], retain=False)
+            client.publish(CURRENT_TEMP_TOPIC, tstat.current_stat['temp'], retain=False)
+            client.publish(TARGET_TEMP_TOPIC, tstat.current_stat['target_temp'], retain=False)
+            client.publish(FAN_TOPIC, tstat.current_stat['fan_state'], retain=False)
+            client.publish(FAN_MODE_TOPIC, tstat.current_stat['fan_mode'], retain=False)
+            client.publish(MODE_TOPIC, tstat.current_stat['mode'], retain=False)
+            client.publish(HOLD_TOPIC, tstat.current_stat['hold_mode'], retain=False)
+    else:
+        logging.info("Update status failed")
+
     sleep(10)
+
+logging.info("Exiting....")
+quit()
 
